@@ -43,9 +43,5 @@ jobs:
       - name: Build
         run: pnpm build
 
-      - name: Upload build artifact
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: actions/upload-artifact@v5
-        with:
-          name: opencode-web-voice-input-dist
-          path: dist
+      - name: Test
+        run: pnpm test
