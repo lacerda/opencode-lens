@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
 import { createServer, get } from "node:http";
-import { resolve } from "node:path";
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import test from "node:test";
 
@@ -70,6 +72,29 @@ test("rewritten HTML preserves UTF-8 characters split across upstream chunks", a
   assert.match(response.body, /snowman: \u2603/);
 });
 
+test("invalid local state does not prevent Lens from starting", async (t) => {
+  const stateDirectory = await mkdtemp(join(tmpdir(), "opencode-lens-"));
+  const statePath = join(stateDirectory, ".lens-state.json");
+  await writeFile(statePath, "not valid JSON\n");
+
+  const lensPort = await unusedPort();
+  const lens = spawn(process.execPath, [proxyPath], {
+    env: {
+      ...process.env,
+      LENS_CONFIG: "missing-lens-config.json",
+      LENS_STATE: statePath,
+      OPENCODE_TARGET: "http://127.0.0.1:1",
+      PORT: String(lensPort),
+    },
+  });
+  t.after(() => lens.kill());
+  await waitForOutput(lens, "Lens ready:");
+
+  const response = await request(lensPort, "/__lens/plugins");
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(JSON.parse(response.body), { plugins: [] });
+});
+
 async function unusedPort() {
   const server = createServer();
   server.listen(0, "127.0.0.1");
@@ -100,15 +125,17 @@ function waitForOutput(child, expected) {
   });
 }
 
-function request(port) {
+function request(port, path = "/") {
   return new Promise((resolveResponse, reject) => {
-    get(`http://127.0.0.1:${port}/`, (response) => {
+    get(`http://127.0.0.1:${port}${path}`, (response) => {
       let body = "";
       response.setEncoding("utf8");
       response.on("data", (chunk) => {
         body += chunk;
       });
-      response.on("end", () => resolveResponse({ headers: response.headers, body }));
+      response.on("end", () =>
+        resolveResponse({ statusCode: response.statusCode, headers: response.headers, body }),
+      );
     }).on("error", reject);
   });
 }

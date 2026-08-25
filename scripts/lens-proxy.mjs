@@ -236,7 +236,25 @@ function isPluginEnabled(plugin) {
 function readState() {
   const resolvedState = resolve(cwd, statePath);
   if (!existsSync(resolvedState)) return { plugins: {} };
-  return JSON.parse(readFileSync(resolvedState, "utf8"));
+
+  try {
+    const parsed = JSON.parse(readFileSync(resolvedState, "utf8"));
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error("state must be a JSON object");
+    }
+    if (
+      parsed.plugins !== undefined &&
+      (!parsed.plugins || typeof parsed.plugins !== "object" || Array.isArray(parsed.plugins))
+    ) {
+      throw new Error("state plugins must be a JSON object");
+    }
+
+    return { ...parsed, plugins: parsed.plugins || {} };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "invalid JSON";
+    console.warn(`Lens ignored invalid state at ${resolvedState}: ${message}`);
+    return { plugins: {} };
+  }
 }
 
 function writeState() {
