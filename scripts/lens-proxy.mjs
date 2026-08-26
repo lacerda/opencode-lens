@@ -32,6 +32,7 @@ const proxyRequest = targetUrl.protocol === "https:" ? httpsRequest : httpReques
 const INJECT_HEAD = "</head>";
 const INJECT_BODY = "</body>";
 const MAX_REQUEST_BODY_BYTES = 64 * 1024;
+const MAX_HTML_INJECTION_BYTES = 8 * 1024 * 1024;
 
 const server = createServer(async (clientReq, clientRes) => {
   if (clientReq.url?.startsWith("/__lens/")) {
@@ -54,18 +55,36 @@ const server = createServer(async (clientReq, clientRes) => {
     (proxyRes) => {
       const contentType = proxyRes.headers["content-type"] || "";
       const isHtml = String(contentType).includes("text/html");
+      const contentLength = Number(proxyRes.headers["content-length"]);
 
-      if (!isHtml || proxyRes.statusCode !== 200) {
+      if (
+        !isHtml ||
+        proxyRes.statusCode !== 200 ||
+        (Number.isFinite(contentLength) && contentLength > MAX_HTML_INJECTION_BYTES)
+      ) {
         clientRes.writeHead(proxyRes.statusCode ?? 502, proxyRes.headers);
         proxyRes.pipe(clientRes);
         return;
       }
 
       const chunks = [];
+      let bodySize = 0;
+      let passthrough = false;
       proxyRes.on("data", (chunk) => {
+        if (passthrough) return;
+
         chunks.push(chunk);
+        bodySize += chunk.length;
+        if (bodySize > MAX_HTML_INJECTION_BYTES) {
+          passthrough = true;
+          clientRes.writeHead(proxyRes.statusCode ?? 502, proxyRes.headers);
+          clientRes.write(Buffer.concat(chunks));
+          proxyRes.pipe(clientRes);
+        }
       });
       proxyRes.on("end", () => {
+        if (passthrough) return;
+
         const body = inject(Buffer.concat(chunks).toString("utf8"), getEnabledInjections());
 
         const responseHeaders = { ...proxyRes.headers };

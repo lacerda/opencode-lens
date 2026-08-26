@@ -72,6 +72,39 @@ test("rewritten HTML preserves UTF-8 characters split across upstream chunks", a
   assert.match(response.body, /snowman: \u2603/);
 });
 
+test("large HTML responses pass through without buffering or injection", async (t) => {
+  const body = `<html><head></head><body>${"x".repeat(8 * 1024 * 1024)}</body></html>`;
+  const upstream = createServer((_, response) => {
+    response.writeHead(200, {
+      "content-type": "text/html",
+      "content-length": Buffer.byteLength(body),
+    });
+    response.end(body);
+  });
+  upstream.listen(0, "127.0.0.1");
+  await once(upstream, "listening");
+  t.after(() => upstream.close());
+
+  const upstreamAddress = upstream.address();
+  assert(upstreamAddress && typeof upstreamAddress !== "string");
+  const lensPort = await unusedPort();
+  const lens = spawn(process.execPath, [proxyPath], {
+    env: {
+      ...process.env,
+      LENS_CONFIG: "missing-lens-config.json",
+      OPENCODE_TARGET: `http://127.0.0.1:${upstreamAddress.port}`,
+      PORT: String(lensPort),
+    },
+  });
+  t.after(() => lens.kill());
+  await waitForOutput(lens, "Lens ready:");
+
+  const response = await request(lensPort);
+  assert.equal(response.headers["content-length"], String(Buffer.byteLength(body)));
+  assert.equal(response.body, body);
+  assert.doesNotMatch(response.body, /data-lens-settings/);
+});
+
 test("invalid local state does not prevent Lens from starting", async (t) => {
   const stateDirectory = await mkdtemp(join(tmpdir(), "opencode-lens-"));
   const statePath = join(stateDirectory, ".lens-state.json");
