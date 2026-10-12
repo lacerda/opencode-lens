@@ -12,6 +12,10 @@ const target = process.env.OPENCODE_TARGET || "http://127.0.0.1:5050";
 const port = parseInt(process.env.PORT || "3000", 10);
 const configPath = process.env.LENS_CONFIG || "lens.config.json";
 const statePath = process.env.LENS_STATE || ".lens-state.json";
+// Optional: OpenAI-compatible transcription endpoint that POST /__lens/stt forwards to,
+// e.g. http://100.64.0.10:8080/v1/audio/transcriptions
+const sttTarget = process.env.LENS_STT_TARGET || "";
+const MAX_STT_UPLOAD_BYTES = 25 * 1024 * 1024;
 const pluginSpecs = readPluginSpecs();
 const plugins = pluginSpecs.map(normalizePluginSpec).map(loadPlugin);
 const state = readState();
@@ -283,6 +287,11 @@ function writeState() {
 async function handleLensRequest(req, res) {
   const url = new URL(req.url, `http://127.0.0.1:${port}`);
 
+  if (req.method === "POST" && url.pathname === "/__lens/stt") {
+    proxyTranscription(req, res);
+    return;
+  }
+
   if (req.method === "GET" && url.pathname === "/__lens/plugins") {
     sendJson(res, {
       plugins: plugins.map((plugin) => ({
@@ -369,6 +378,55 @@ function requestBodyTooLargeError() {
   const error = new Error(`Request body must not exceed ${MAX_REQUEST_BODY_BYTES} bytes`);
   error.statusCode = 413;
   return error;
+}
+
+function proxyTranscription(req, res) {
+  if (!sttTarget) {
+    sendJson(res, { error: "LENS_STT_TARGET is not set" }, 503);
+    return;
+  }
+
+  let sttUrl;
+  try {
+    sttUrl = new URL(sttTarget);
+  } catch {
+    sendJson(res, { error: "LENS_STT_TARGET is not a valid URL" }, 500);
+    return;
+  }
+  if (!["http:", "https:"].includes(sttUrl.protocol)) {
+    sendJson(res, { error: "LENS_STT_TARGET must use http or https" }, 500);
+    return;
+  }
+
+  const length = Number(req.headers["content-length"]);
+  if (Number.isFinite(length) && length > MAX_STT_UPLOAD_BYTES) {
+    sendJson(res, { error: "Audio upload is too large" }, 413);
+    req.resume();
+    return;
+  }
+
+  const headers = {};
+  for (const key of ["content-type", "content-length"]) {
+    if (req.headers[key]) headers[key] = req.headers[key];
+  }
+
+  const send = sttUrl.protocol === "https:" ? httpsRequest : httpRequest;
+  const upstream = send(sttUrl, { method: "POST", headers }, (upstreamRes) => {
+    res.writeHead(upstreamRes.statusCode ?? 502, {
+      "content-type": upstreamRes.headers["content-type"] || "application/json",
+    });
+    upstreamRes.pipe(res);
+  });
+  upstream.setTimeout(120_000, () => upstream.destroy(new Error("Transcription timed out")));
+  upstream.on("error", (error) => {
+    if (!res.headersSent) {
+      sendJson(res, { error: `Transcription service unreachable: ${error.message}` }, 502);
+    } else {
+      res.destroy();
+    }
+  });
+
+  req.pipe(upstream);
 }
 
 function sendJson(res, body, status = 200) {
