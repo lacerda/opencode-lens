@@ -16,6 +16,13 @@ const statePath = process.env.LENS_STATE || ".lens-state.json";
 // e.g. http://100.64.0.10:8080/v1/audio/transcriptions
 const sttTarget = process.env.LENS_STT_TARGET || "";
 const MAX_STT_UPLOAD_BYTES = 25 * 1024 * 1024;
+// Optional: streaming transcription WebSocket that /__lens/asr is tunnelled to,
+// e.g. ws://100.64.0.10:8080/upstream/live-stt/asr
+const asrTarget = process.env.LENS_ASR_TARGET || "";
+const asrUrl = asrTarget ? new URL(asrTarget) : null;
+if (asrUrl && !["ws:", "wss:", "http:", "https:"].includes(asrUrl.protocol)) {
+  throw new Error("LENS_ASR_TARGET must use the ws, wss, http or https protocol.");
+}
 const pluginSpecs = readPluginSpecs();
 const plugins = pluginSpecs.map(normalizePluginSpec).map(loadPlugin);
 const state = readState();
@@ -115,15 +122,30 @@ const server = createServer(async (clientReq, clientRes) => {
 });
 
 server.on("upgrade", (clientReq, clientSocket, clientHead) => {
-  const connectToTarget = targetUrl.protocol === "https:" ? connectTls : connect;
-  const proxySocket = connectToTarget(
-    targetUrl.protocol === "https:"
-      ? { host: targetHost, port: targetPort, servername: targetHost }
-      : { host: targetHost, port: targetPort },
+  if (clientReq.url === "/__lens/asr" || clientReq.url?.startsWith("/__lens/asr?")) {
+    if (!asrUrl) {
+      clientSocket.end("HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n");
+      return;
+    }
+    tunnelUpgrade(clientReq, clientSocket, clientHead, asrUrl, asrUrl.pathname + asrUrl.search);
+    return;
+  }
+  tunnelUpgrade(clientReq, clientSocket, clientHead, targetUrl, clientReq.url);
+});
+
+function tunnelUpgrade(clientReq, clientSocket, clientHead, upstreamUrl, path) {
+  const secure = upstreamUrl.protocol === "https:" || upstreamUrl.protocol === "wss:";
+  const host = upstreamUrl.hostname;
+  const upstreamPort = parseInt(upstreamUrl.port || (secure ? "443" : "80"), 10);
+  const connectToUpstream = secure ? connectTls : connect;
+  const proxySocket = connectToUpstream(
+    secure
+      ? { host, port: upstreamPort, servername: host }
+      : { host, port: upstreamPort },
     () => {
       const lines = [
-        `${clientReq.method} ${clientReq.url} HTTP/${clientReq.httpVersion}`,
-        `Host: ${targetUrl.host}`,
+        `${clientReq.method} ${path} HTTP/${clientReq.httpVersion}`,
+        `Host: ${upstreamUrl.host}`,
         "Connection: Upgrade",
         ...Object.entries(clientReq.headers)
           .filter(([key]) => !["host", "connection", "upgrade"].includes(key.toLowerCase()))
@@ -143,7 +165,7 @@ server.on("upgrade", (clientReq, clientSocket, clientHead) => {
 
   proxySocket.on("error", () => clientSocket.destroy());
   clientSocket.on("error", () => proxySocket.destroy());
-});
+}
 
 server.listen(port, "127.0.0.1", () => {
   console.log(`Lens ready: http://127.0.0.1:${port} -> ${target}`);
