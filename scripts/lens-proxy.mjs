@@ -52,7 +52,10 @@ const server = createServer(async (clientReq, clientRes) => {
   }
 
   const headers = { ...clientReq.headers };
-  delete headers["accept-encoding"];
+  // Only page loads need an uncompressed response, so the plugin scripts can be
+  // injected. Scripts, styles and API calls keep their compression.
+  const wantsHtml = String(clientReq.headers.accept || "").includes("text/html");
+  if (wantsHtml) delete headers["accept-encoding"];
   delete headers.host;
 
   const proxyReq = proxyRequest(
@@ -70,6 +73,7 @@ const server = createServer(async (clientReq, clientRes) => {
 
       if (
         !isHtml ||
+        proxyRes.headers["content-encoding"] ||
         proxyRes.statusCode !== 200 ||
         (Number.isFinite(contentLength) && contentLength > MAX_HTML_INJECTION_BYTES)
       ) {
